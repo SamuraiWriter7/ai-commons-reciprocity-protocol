@@ -1,0 +1,52 @@
+{
+  "record_type": "reciprocity_agreement",
+  "schema_version": "0.1.0",
+  "agreement_id": "urn:example:agreement:ai-collaboration-001",
+  "agreement_version": "1.0.0",
+  "project_ref": "urn:example:project:community-ai-001",
+  "created_at": "2026-09-21T00:00:00Z",
+  "valid_from": "2026-10-01T00:00:00Z",
+  "valid_until": "2027-04-01T00:00:00Z",
+  "parties": [
+    "urn:example:organization:compute-provider",
+    "urn:example:organization:community-lab"
+  ],
+  "terms": [
+    {
+      "term_id": "urn:example:term:compute-100-hours",
+      "provider_id": "urn:example:organization:compute-provider",
+      "beneficiary_id": "urn:example:organization:community-lab",
+      "resource_id": "urn:example:resource:compute-service-a-v1",
+      "description": "Provide 100 hours of compute service A under its fixed v1 service specification.",
+      "quantity": "100",
+      "unit": {
+        "namespace": "urn:example:unit:compute-service-a-v1",
+        "code": "HOUR"
+      },
+      "trigger": {
+        "type": "unconditional"
+      },
+      "due_at": "2027-03-31T23:59:59Z",
+      "confirmation_method_ref": "urn:example:procedure:compute-usage-confirmation:v1"
+    },
+    {
+      "term_id": "urn:example:term:compute-100-hours",
+      "provider_id": "urn:example:organization:compute-provider",
+      "beneficiary_id": "urn:example:organization:community-lab",
+      "resource_id": "urn:example:resource:ai-training-course-a-v1",
+      "description": "Provide 20 participant seats in AI training course A under its fixed v1 course specification.",
+      "quantity": "20",
+      "unit": {
+        "namespace": "urn:example:unit:ai-training-course-a-v1",
+        "code": "SEAT"
+      },
+      "trigger": {
+        "type": "unconditional"
+      },
+      "due_at": "2027-03-31T23:59:59Z",
+      "confirmation_method_ref": "urn:example:procedure:training-receipt-confirmation:v1"
+    }
+  ],
+  "external_refs": [],
+  "agreement_digest": "sha256:c2924b04b35ee1247f743281eb6668871d58c47e8334aab997c486a2cf5bfb20"
+}
