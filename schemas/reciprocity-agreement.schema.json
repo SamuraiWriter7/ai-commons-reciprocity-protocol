@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reciprocity Agreement",
+  "description": "A versioned agreement defining parties, return terms, activation conditions, deadlines, and receipt confirmation methods.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type",
+    "schema_version",
+    "agreement_id",
+    "agreement_version",
+    "agreement_digest",
+    "project_ref",
+    "created_at",
+    "valid_from",
+    "valid_until",
+    "parties",
+    "terms",
+    "external_refs"
+  ],
+  "properties": {
+    "record_type": {
+      "const": "reciprocity_agreement"
+    },
+    "schema_version": {
+      "const": "0.1.0"
+    },
+    "agreement_id": {
+      "$ref": "#/$defs/absoluteUri"
+    },
+    "agreement_version": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "\\S",
+      "description": "The business version of this agreement, distinct from schema_version."
+    },
+    "agreement_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 of the RFC 8785 canonicalized agreement, excluding only the top-level agreement_digest property."
+    },
+    "project_ref": {
+      "$ref": "#/$defs/absoluteUri"
+    },
+    "created_at": {
+      "$ref": "#/$defs/utcDateTime"
+    },
+    "valid_from": {
+      "$ref": "#/$defs/utcDateTime"
+    },
+    "valid_until": {
+      "$ref": "#/$defs/utcDateTime"
+    },
+    "parties": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/absoluteUri"
+      },
+      "description": "Identifiers of all parties whose acceptance is required to activate a commitment."
+    },
+    "terms": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/returnTerm"
+      }
+    },
+    "external_refs": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/absoluteUri"
+      },
+      "description": "References to existing protocol records or supporting documents. An empty array is allowed."
+    }
+  },
+  "$defs": {
+    "absoluteUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:",
+      "minLength": 1
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "RFC 3339 UTC timestamp ending in Z."
+    },
+    "positiveDecimal": {
+      "type": "string",
+      "maxLength": 49,
+      "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,18})?$",
+      "not": {
+        "pattern": "^0(?:\\.0+)?$"
+      },
+      "description": "A positive decimal string with up to 30 integer digits and 18 fractional digits. No exponent notation."
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "code"
+      ],
+      "properties": {
+        "namespace": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "description": "Unit identity is the exact pair of namespace and code."
+    },
+    "trigger": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type"
+          ],
+          "properties": {
+            "type": {
+              "const": "unconditional"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "condition_ref",
+            "verifier_party_id"
+          ],
+          "properties": {
+            "type": {
+              "const": "evidence_required"
+            },
+            "condition_ref": {
+              "$ref": "#/$defs/absoluteUri"
+            },
+            "verifier_party_id": {
+              "$ref": "#/$defs/absoluteUri"
+            }
+          }
+        }
+      ]
+    },
+    "returnTerm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "term_id",
+        "provider_id",
+        "beneficiary_id",
+        "resource_id",
+        "description",
+        "quantity",
+        "unit",
+        "trigger",
+        "due_at",
+        "confirmation_method_ref"
+      ],
+      "properties": {
+        "term_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "provider_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "beneficiary_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "resource_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        },
+        "quantity": {
+          "$ref": "#/$defs/positiveDecimal"
+        },
+        "unit": {
+          "$ref": "#/$defs/unit"
+        },
+        "trigger": {
+          "$ref": "#/$defs/trigger"
+        },
+        "due_at": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "confirmation_method_ref": {
+          "$ref": "#/$defs/absoluteUri",
+          "description": "Reference to the agreed procedure for confirming receipt."
+        }
+      }
+    }
+  }
+}
