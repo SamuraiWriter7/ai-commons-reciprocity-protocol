@@ -28,8 +28,10 @@ EXPECTED_CASES = {
     "examples/fail/reciprocity-agreement-digest-mismatch.example.json": {
         "DIGEST_MISMATCH"
     },
+    "examples/fail/reciprocity-agreement-duplicate-term-id.example.json": {
+        "DUPLICATE_TERM_ID"
+    },
 }
-
 
 def reject_duplicate_keys(pairs):
     result = {}
