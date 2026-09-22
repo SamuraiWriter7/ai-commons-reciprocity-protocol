@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agreement Acceptance",
+  "description": "An individual party's acceptance of a specific agreement version and content digest, with authority and consent evidence references.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type",
+    "schema_version",
+    "acceptance_id",
+    "agreement",
+    "party_id",
+    "accepted_at",
+    "authority_ref",
+    "consent_evidence_ref"
+  ],
+  "properties": {
+    "record_type": {
+      "const": "agreement_acceptance"
+    },
+    "schema_version": {
+      "const": "0.2.0"
+    },
+    "acceptance_id": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Unique identifier of this acceptance record."
+    },
+    "agreement": {
+      "$ref": "#/$defs/agreementReference"
+    },
+    "party_id": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "The agreement party on whose behalf acceptance is recorded."
+    },
+    "accepted_at": {
+      "$ref": "#/$defs/utcDateTime"
+    },
+    "authority_ref": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Reference to evidence of authority to accept this agreement on behalf of party_id."
+    },
+    "consent_evidence_ref": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Reference to evidence of the party's acceptance of the exact agreement version and digest."
+    }
+  },
+  "$defs": {
+    "absoluteUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:",
+      "minLength": 1
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "RFC 3339 UTC timestamp ending in Z."
+    },
+    "agreementReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agreement_id",
+        "agreement_version",
+        "agreement_digest"
+      ],
+      "properties": {
+        "agreement_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "agreement_version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Exact business version of the referenced agreement."
+        },
+        "agreement_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Exact content digest of the referenced agreement."
+        }
+      }
+    }
+  }
+}
