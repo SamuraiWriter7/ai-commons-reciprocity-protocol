@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate ACRP v0.1 agreement examples."""
+"""Validate ACRP v0.1 agreements and v0.2 acceptances."""
 
 from __future__ import annotations
 
@@ -17,12 +17,16 @@ from jsonschema.exceptions import SchemaError
 
 ROOT = Path(__file__).resolve().parents[1]
 
-SCHEMA_PATH = (
-    ROOT / "schemas/reciprocity-agreement.schema.json"
-)
+SCHEMA_PATHS = {
+    "reciprocity_agreement": (
+        "schemas/reciprocity-agreement.schema.json"
+    ),
+    "agreement_acceptance": (
+        "schemas/agreement-acceptance.schema.json"
+    ),
+}
 
-# Each example is an independent validation case.
-# Failure examples intentionally reuse identifiers from the valid example.
+# Each file is an independent validation case.
 EXPECTED_CASES = {
     "examples/pass/reciprocity-agreement-basic.example.json": set(),
     "examples/fail/reciprocity-agreement-digest-mismatch.example.json": {
@@ -31,16 +35,19 @@ EXPECTED_CASES = {
     "examples/fail/reciprocity-agreement-duplicate-term-id.example.json": {
         "DUPLICATE_TERM_ID"
     },
+    "examples/pass/agreement-acceptance-basic.example.json": set(),
+    "examples/fail/agreement-acceptance-wrong-digest.example.json": {
+        "ACCEPTANCE_DIGEST_MISMATCH"
+    },
 }
+
 
 def reject_duplicate_keys(pairs):
     result = {}
-
     for key, value in pairs:
         if key in result:
             raise ValueError(f"Duplicate JSON property: {key!r}")
         result[key] = value
-
     return result
 
 
@@ -70,29 +77,36 @@ def parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00")
 
 
-def validate_agreement(document, validator):
-    issues = []
+def agreement_key(record):
+    return (
+        record["agreement_id"],
+        record["agreement_version"],
+    )
 
-    def add(code: str, message: str):
-        issues.append((code, message))
 
-    schema_errors = sorted(
-        validator.iter_errors(document),
+def schema_issues(record, validator):
+    errors = sorted(
+        validator.iter_errors(record),
         key=lambda error: (
             json_pointer(error.absolute_path),
             error.message,
         ),
     )
-
-    for error in schema_errors:
-        add(
+    return [
+        (
             "SCHEMA",
             f"{json_pointer(error.absolute_path)}: {error.message}",
         )
+        for error in errors
+    ]
 
-    # Do not access fields or calculate a digest on malformed records.
-    if schema_errors:
-        return issues
+
+def validate_agreement(document):
+    """Check relationships after successful schema validation."""
+    issues = []
+
+    def add(code, message):
+        issues.append((code, message))
 
     parties = set(document["parties"])
     seen_term_ids = set()
@@ -121,7 +135,6 @@ def validate_agreement(document, validator):
             )
 
         trigger = term["trigger"]
-
         if trigger["type"] == "evidence_required":
             if trigger["verifier_party_id"] not in parties:
                 add(
@@ -146,13 +159,11 @@ def validate_agreement(document, validator):
                 "AGREEMENT_TIME",
                 "created_at must be <= valid_from.",
             )
-
         if valid_from >= valid_until:
             add(
                 "AGREEMENT_TIME",
                 "valid_from must be < valid_until.",
             )
-
         for index, due_at in enumerate(due_dates):
             if due_at < valid_from:
                 add(
@@ -175,7 +186,6 @@ def validate_agreement(document, validator):
             "sha256:"
             + hashlib.sha256(canonical_bytes).hexdigest()
         )
-
         if document["agreement_digest"] != calculated_digest:
             add(
                 "DIGEST_MISMATCH",
@@ -186,13 +196,187 @@ def validate_agreement(document, validator):
     return issues
 
 
-def validate_file(path: Path, validator):
+def validate_acceptance(record, agreement):
+    """Compare an acceptance with one valid, unambiguous agreement."""
+    issues = []
+
+    if (
+        record["agreement"]["agreement_digest"]
+        != agreement["agreement_digest"]
+    ):
+        issues.append((
+            "ACCEPTANCE_DIGEST_MISMATCH",
+            "Acceptance digest does not match the referenced agreement.",
+        ))
+
+    if record["party_id"] not in agreement["parties"]:
+        issues.append((
+            "ACCEPTANCE_PARTY_NOT_FOUND",
+            "Acceptance party_id is not in agreement parties.",
+        ))
+
+    try:
+        accepted_at = parse_utc(record["accepted_at"])
+        created_at = parse_utc(agreement["created_at"])
+        valid_until = parse_utc(agreement["valid_until"])
+    except ValueError as exc:
+        issues.append(("DATETIME_PARSE", str(exc)))
+    else:
+        if not created_at <= accepted_at < valid_until:
+            issues.append((
+                "ACCEPTANCE_TIME",
+                "accepted_at must satisfy "
+                "created_at <= accepted_at < valid_until.",
+            ))
+
+    return issues
+
+
+def extract_records(document):
+    if not isinstance(document, dict):
+        raise ValueError("Input must be a JSON object.")
+
+    if "records" not in document:
+        # Preserve support for v0.1 standalone records.
+        return [document]
+
+    if set(document) != {"records"}:
+        raise ValueError(
+            "A record-set container must contain only records."
+        )
+
+    records = document["records"]
+    if not isinstance(records, list) or not records:
+        raise ValueError("records must be a non-empty array.")
+
+    return records
+
+
+def validate_document(document, validators):
+    try:
+        records = extract_records(document)
+    except ValueError as exc:
+        return [("INPUT_ERROR", str(exc))]
+
+    issues = []
+
+    def append_at(index, found):
+        for code, message in found:
+            issues.append((code, f"record[{index}] {message}"))
+
+    # First validate all record structures.
+    # Cross-record checks require schema-valid fields.
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            append_at(index, [("SCHEMA", "Record must be an object.")])
+            continue
+
+        record_type = record.get("record_type")
+        if (
+            not isinstance(record_type, str)
+            or record_type not in validators
+        ):
+            append_at(index, [(
+                "SCHEMA",
+                "Missing or unsupported record_type.",
+            )])
+            continue
+
+        append_at(
+            index,
+            schema_issues(record, validators[record_type]),
+        )
+
+    if issues:
+        return issues
+
+    # Store every candidate, rather than overwriting duplicate keys.
+    agreements = {}
+
+    for index, record in enumerate(records):
+        if record["record_type"] != "reciprocity_agreement":
+            continue
+
+        found = validate_agreement(record)
+        append_at(index, found)
+
+        key = agreement_key(record)
+        candidates = agreements.setdefault(key, [])
+
+        if candidates:
+            append_at(index, [(
+                "DUPLICATE_AGREEMENT",
+                "agreement_id and agreement_version must be unique.",
+            )])
+
+        candidates.append((record, not found))
+
+    seen_acceptance_ids = set()
+    seen_party_acceptances = set()
+
+    for index, record in enumerate(records):
+        if record["record_type"] != "agreement_acceptance":
+            continue
+
+        acceptance_id = record["acceptance_id"]
+        if acceptance_id in seen_acceptance_ids:
+            append_at(index, [(
+                "DUPLICATE_ACCEPTANCE_ID",
+                "acceptance_id duplicates another acceptance.",
+            )])
+        seen_acceptance_ids.add(acceptance_id)
+
+        reference = record["agreement"]
+        key = agreement_key(reference)
+        party_key = (*key, record["party_id"])
+
+        if party_key in seen_party_acceptances:
+            append_at(index, [(
+                "DUPLICATE_PARTY_ACCEPTANCE",
+                "The same party has multiple acceptances "
+                "for the same agreement version.",
+            )])
+        seen_party_acceptances.add(party_key)
+
+        candidates = agreements.get(key, [])
+
+        if not candidates:
+            append_at(index, [(
+                "MISSING_AGREEMENT",
+                "No agreement matches the referenced ID and version.",
+            )])
+            continue
+
+        if len(candidates) != 1:
+            append_at(index, [(
+                "AMBIGUOUS_AGREEMENT",
+                "Multiple agreements match the referenced ID and version.",
+            )])
+            continue
+
+        agreement, agreement_is_valid = candidates[0]
+
+        if not agreement_is_valid:
+            append_at(index, [(
+                "INVALID_REFERENCED_AGREEMENT",
+                "The referenced agreement failed validation.",
+            )])
+            continue
+
+        append_at(index, validate_acceptance(record, agreement))
+
+    # Partial consent is permitted in v0.2.
+    # Record-set validity does not imply unanimous consent or activation.
+    return issues
+
+
+def validate_file(path: Path, validators):
     try:
         document = read_json(path)
     except (OSError, ValueError, UnicodeError) as exc:
         return [("INPUT_ERROR", str(exc))]
 
-    return validate_agreement(document, validator)
+    return validate_document(document, validators)
 
 
 def print_issues(issues):
@@ -200,11 +384,11 @@ def print_issues(issues):
         print(f"  {code}: {message}")
 
 
-def run_examples(validator) -> int:
+def run_examples(validators) -> int:
     matched_count = 0
 
     for relative_path, expected_codes in EXPECTED_CASES.items():
-        issues = validate_file(ROOT / relative_path, validator)
+        issues = validate_file(ROOT / relative_path, validators)
         actual_codes = {code for code, _ in issues}
         matched = actual_codes == expected_codes
 
@@ -226,34 +410,24 @@ def run_examples(validator) -> int:
         f"{matched_count}/{total} scenarios "
         "matched expected results."
     )
-
     return 0 if matched_count == total else 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Validate ACRP v0.1 agreement records."
+        description="Validate ACRP agreements and acceptances."
     )
     parser.add_argument(
         "--dataset",
         type=Path,
         help=(
-            "Validate one agreement JSON file. "
+            "Validate one JSON record or record-set file. "
             "Relative paths are resolved from the repository root."
         ),
     )
     args = parser.parse_args()
 
-    try:
-        schema = read_json(SCHEMA_PATH)
-        Draft202012Validator.check_schema(schema)
-    except (OSError, ValueError, UnicodeError, SchemaError) as exc:
-        print(f"Schema setup failed: {exc}", file=sys.stderr)
-        return 2
-
     format_checker = FormatChecker()
-
-    # Fail explicitly if required format support is unavailable.
     for required_format in ("uri", "date-time"):
         if required_format not in format_checker.checkers:
             print(
@@ -263,19 +437,32 @@ def main() -> int:
             )
             return 2
 
-    validator = Draft202012Validator(
-        schema,
-        format_checker=format_checker,
-    )
+    validators = {}
+
+    for record_type, relative_path in SCHEMA_PATHS.items():
+        try:
+            schema = read_json(ROOT / relative_path)
+            Draft202012Validator.check_schema(schema)
+        except (OSError, ValueError, UnicodeError, SchemaError) as exc:
+            print(
+                f"Schema setup failed ({relative_path}): {exc}",
+                file=sys.stderr,
+            )
+            return 2
+
+        validators[record_type] = Draft202012Validator(
+            schema,
+            format_checker=format_checker,
+        )
 
     if args.dataset is None:
-        return run_examples(validator)
+        return run_examples(validators)
 
     path = args.dataset
     if not path.is_absolute():
         path = ROOT / path
 
-    issues = validate_file(path, validator)
+    issues = validate_file(path, validators)
     codes = sorted({code for code, _ in issues})
 
     if issues:
