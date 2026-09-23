@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate ACRP v0.1 agreements and v0.2 acceptances."""
+"""Validate ACRP agreements, acceptances, and return commitments."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ SCHEMA_PATHS = {
     "agreement_acceptance": (
         "schemas/agreement-acceptance.schema.json"
     ),
+    "return_commitment": (
+        "schemas/return-commitment.schema.json"
+    ),
 }
 
 # Each file is an independent validation case.
@@ -39,15 +42,21 @@ EXPECTED_CASES = {
     "examples/fail/agreement-acceptance-wrong-digest.example.json": {
         "ACCEPTANCE_DIGEST_MISMATCH"
     },
+    "examples/pass/return-commitment-basic.example.json": set(),
+    "examples/fail/return-commitment-wrong-activation-actor.example.json": {
+        "ACTIVATION_ACTOR"
+    },
 }
 
 
 def reject_duplicate_keys(pairs):
     result = {}
+
     for key, value in pairs:
         if key in result:
             raise ValueError(f"Duplicate JSON property: {key!r}")
         result[key] = value
+
     return result
 
 
@@ -92,6 +101,7 @@ def schema_issues(record, validator):
             error.message,
         ),
     )
+
     return [
         (
             "SCHEMA",
@@ -135,6 +145,7 @@ def validate_agreement(document):
             )
 
         trigger = term["trigger"]
+
         if trigger["type"] == "evidence_required":
             if trigger["verifier_party_id"] not in parties:
                 add(
@@ -159,11 +170,13 @@ def validate_agreement(document):
                 "AGREEMENT_TIME",
                 "created_at must be <= valid_from.",
             )
+
         if valid_from >= valid_until:
             add(
                 "AGREEMENT_TIME",
                 "valid_from must be < valid_until.",
             )
+
         for index, due_at in enumerate(due_dates):
             if due_at < valid_from:
                 add(
@@ -186,6 +199,7 @@ def validate_agreement(document):
             "sha256:"
             + hashlib.sha256(canonical_bytes).hexdigest()
         )
+
         if document["agreement_digest"] != calculated_digest:
             add(
                 "DIGEST_MISMATCH",
@@ -204,16 +218,21 @@ def validate_acceptance(record, agreement):
         record["agreement"]["agreement_digest"]
         != agreement["agreement_digest"]
     ):
-        issues.append((
-            "ACCEPTANCE_DIGEST_MISMATCH",
-            "Acceptance digest does not match the referenced agreement.",
-        ))
+        issues.append(
+            (
+                "ACCEPTANCE_DIGEST_MISMATCH",
+                "Acceptance digest does not match "
+                "the referenced agreement.",
+            )
+        )
 
     if record["party_id"] not in agreement["parties"]:
-        issues.append((
-            "ACCEPTANCE_PARTY_NOT_FOUND",
-            "Acceptance party_id is not in agreement parties.",
-        ))
+        issues.append(
+            (
+                "ACCEPTANCE_PARTY_NOT_FOUND",
+                "Acceptance party_id is not in agreement parties.",
+            )
+        )
 
     try:
         accepted_at = parse_utc(record["accepted_at"])
@@ -223,11 +242,13 @@ def validate_acceptance(record, agreement):
         issues.append(("DATETIME_PARSE", str(exc)))
     else:
         if not created_at <= accepted_at < valid_until:
-            issues.append((
-                "ACCEPTANCE_TIME",
-                "accepted_at must satisfy "
-                "created_at <= accepted_at < valid_until.",
-            ))
+            issues.append(
+                (
+                    "ACCEPTANCE_TIME",
+                    "accepted_at must satisfy "
+                    "created_at <= accepted_at < valid_until.",
+                )
+            )
 
     return issues
 
@@ -237,7 +258,7 @@ def extract_records(document):
         raise ValueError("Input must be a JSON object.")
 
     if "records" not in document:
-        # Preserve support for v0.1 standalone records.
+        # Preserve support for standalone records.
         return [document]
 
     if set(document) != {"records"}:
@@ -246,6 +267,7 @@ def extract_records(document):
         )
 
     records = document["records"]
+
     if not isinstance(records, list) or not records:
         raise ValueError("records must be a non-empty array.")
 
@@ -259,27 +281,35 @@ def validate_document(document, validators):
         return [("INPUT_ERROR", str(exc))]
 
     issues = []
+    invalid_indices = set()
 
     def append_at(index, found):
+        if found:
+            invalid_indices.add(index)
+
         for code, message in found:
             issues.append((code, f"record[{index}] {message}"))
 
-    # First validate all record structures.
-    # Cross-record checks require schema-valid fields.
+    def add(index, code, message):
+        append_at(index, [(code, message)])
+
+    # Validate structures before accessing fields.
     for index, record in enumerate(records):
         if not isinstance(record, dict):
-            append_at(index, [("SCHEMA", "Record must be an object.")])
+            add(index, "SCHEMA", "Record must be an object.")
             continue
 
         record_type = record.get("record_type")
+
         if (
             not isinstance(record_type, str)
             or record_type not in validators
         ):
-            append_at(index, [(
+            add(
+                index,
                 "SCHEMA",
                 "Missing or unsupported record_type.",
-            )])
+            )
             continue
 
         append_at(
@@ -290,83 +320,282 @@ def validate_document(document, validators):
     if issues:
         return issues
 
-    # Store every candidate, rather than overwriting duplicate keys.
+    # Build complete indexes before resolving any references.
     agreements = {}
+    acceptances = {}
+    party_acceptances = {}
+    commitments = {}
+    term_commitments = {}
 
     for index, record in enumerate(records):
-        if record["record_type"] != "reciprocity_agreement":
-            continue
+        record_type = record["record_type"]
 
-        found = validate_agreement(record)
-        append_at(index, found)
+        if record_type == "reciprocity_agreement":
+            key = agreement_key(record)
+            agreements.setdefault(key, []).append(index)
 
-        key = agreement_key(record)
-        candidates = agreements.setdefault(key, [])
+        elif record_type == "agreement_acceptance":
+            acceptance_id = record["acceptance_id"]
+            acceptances.setdefault(acceptance_id, []).append(index)
 
-        if candidates:
-            append_at(index, [(
-                "DUPLICATE_AGREEMENT",
-                "agreement_id and agreement_version must be unique.",
-            )])
+            key = (
+                *agreement_key(record["agreement"]),
+                record["party_id"],
+            )
+            party_acceptances.setdefault(key, []).append(index)
 
-        candidates.append((record, not found))
+        elif record_type == "return_commitment":
+            commitment_id = record["commitment_id"]
+            commitments.setdefault(commitment_id, []).append(index)
 
-    seen_acceptance_ids = set()
-    seen_party_acceptances = set()
+            key = (
+                *agreement_key(record["agreement"]),
+                record["term_id"],
+            )
+            term_commitments.setdefault(key, []).append(index)
 
+    def reject_duplicates(groups, code, message):
+        for indices in groups.values():
+            if len(indices) > 1:
+                for index in indices:
+                    add(index, code, message)
+
+    # Mark every member of a duplicate group as invalid.
+    reject_duplicates(
+        agreements,
+        "DUPLICATE_AGREEMENT",
+        "agreement_id and agreement_version must be unique.",
+    )
+    reject_duplicates(
+        acceptances,
+        "DUPLICATE_ACCEPTANCE_ID",
+        "acceptance_id duplicates another acceptance.",
+    )
+    reject_duplicates(
+        party_acceptances,
+        "DUPLICATE_PARTY_ACCEPTANCE",
+        "The same party has multiple acceptances "
+        "for the same agreement version.",
+    )
+    reject_duplicates(
+        commitments,
+        "DUPLICATE_COMMITMENT_ID",
+        "commitment_id duplicates another commitment.",
+    )
+    reject_duplicates(
+        term_commitments,
+        "DUPLICATE_TERM_COMMITMENT",
+        "The same agreement version and term "
+        "have multiple commitments.",
+    )
+
+    # Validate all agreements before acceptances or commitments.
+    for indices in agreements.values():
+        for index in indices:
+            append_at(index, validate_agreement(records[index]))
+
+    def resolve_agreement(index, reference):
+        candidates = agreements.get(agreement_key(reference), [])
+
+        if not candidates:
+            add(
+                index,
+                "MISSING_AGREEMENT",
+                "No agreement matches the referenced ID and version.",
+            )
+            return None
+
+        if len(candidates) != 1:
+            add(
+                index,
+                "AMBIGUOUS_AGREEMENT",
+                "Multiple agreements match "
+                "the referenced ID and version.",
+            )
+            return None
+
+        agreement_index = candidates[0]
+
+        if agreement_index in invalid_indices:
+            add(
+                index,
+                "INVALID_REFERENCED_AGREEMENT",
+                "The referenced agreement failed validation.",
+            )
+            return None
+
+        return records[agreement_index]
+
+    # Finish validating every acceptance before using it for activation.
     for index, record in enumerate(records):
         if record["record_type"] != "agreement_acceptance":
             continue
 
-        acceptance_id = record["acceptance_id"]
-        if acceptance_id in seen_acceptance_ids:
-            append_at(index, [(
-                "DUPLICATE_ACCEPTANCE_ID",
-                "acceptance_id duplicates another acceptance.",
-            )])
-        seen_acceptance_ids.add(acceptance_id)
+        agreement = resolve_agreement(index, record["agreement"])
+
+        if agreement is not None:
+            append_at(
+                index,
+                validate_acceptance(record, agreement),
+            )
+
+    for index, record in enumerate(records):
+        if record["record_type"] != "return_commitment":
+            continue
 
         reference = record["agreement"]
-        key = agreement_key(reference)
-        party_key = (*key, record["party_id"])
+        agreement = resolve_agreement(index, reference)
 
-        if party_key in seen_party_acceptances:
-            append_at(index, [(
-                "DUPLICATE_PARTY_ACCEPTANCE",
-                "The same party has multiple acceptances "
-                "for the same agreement version.",
-            )])
-        seen_party_acceptances.add(party_key)
-
-        candidates = agreements.get(key, [])
-
-        if not candidates:
-            append_at(index, [(
-                "MISSING_AGREEMENT",
-                "No agreement matches the referenced ID and version.",
-            )])
+        if agreement is None:
             continue
 
-        if len(candidates) != 1:
-            append_at(index, [(
-                "AMBIGUOUS_AGREEMENT",
-                "Multiple agreements match the referenced ID and version.",
-            )])
+        if (
+            reference["agreement_digest"]
+            != agreement["agreement_digest"]
+        ):
+            add(
+                index,
+                "COMMITMENT_DIGEST_MISMATCH",
+                "Commitment digest does not match "
+                "the referenced agreement.",
+            )
             continue
 
-        agreement, agreement_is_valid = candidates[0]
+        matching_terms = [
+            term
+            for term in agreement["terms"]
+            if term["term_id"] == record["term_id"]
+        ]
 
-        if not agreement_is_valid:
-            append_at(index, [(
-                "INVALID_REFERENCED_AGREEMENT",
-                "The referenced agreement failed validation.",
-            )])
+        if not matching_terms:
+            add(
+                index,
+                "MISSING_TERM",
+                "term_id is not in the referenced agreement.",
+            )
             continue
 
-        append_at(index, validate_acceptance(record, agreement))
+        # A validated agreement guarantees term_id uniqueness.
+        term = matching_terms[0]
+        selected_acceptances = []
 
-    # Partial consent is permitted in v0.2.
-    # Record-set validity does not imply unanimous consent or activation.
+        for acceptance_id in record["acceptance_ids"]:
+            candidates = acceptances.get(acceptance_id, [])
+
+            if not candidates:
+                add(
+                    index,
+                    "MISSING_ACCEPTANCE",
+                    f"Acceptance not found: {acceptance_id}",
+                )
+                continue
+
+            if len(candidates) != 1:
+                add(
+                    index,
+                    "AMBIGUOUS_ACCEPTANCE",
+                    f"Acceptance ID is not unique: {acceptance_id}",
+                )
+                continue
+
+            acceptance_index = candidates[0]
+
+            if acceptance_index in invalid_indices:
+                add(
+                    index,
+                    "INVALID_REFERENCED_ACCEPTANCE",
+                    f"Acceptance failed validation: {acceptance_id}",
+                )
+                continue
+
+            acceptance = records[acceptance_index]
+
+            # Schemas require the same three reference fields.
+            if acceptance["agreement"] != reference:
+                add(
+                    index,
+                    "COMMITMENT_ACCEPTANCE_BINDING",
+                    "Referenced acceptance targets "
+                    f"a different agreement: {acceptance_id}",
+                )
+                continue
+
+            selected_acceptances.append(acceptance)
+
+        accepted_parties = [
+            acceptance["party_id"]
+            for acceptance in selected_acceptances
+        ]
+        required_parties = set(agreement["parties"])
+
+        if (
+            len(selected_acceptances) != len(record["acceptance_ids"])
+            or len(accepted_parties) != len(set(accepted_parties))
+            or set(accepted_parties) != required_parties
+        ):
+            add(
+                index,
+                "CONSENT_INCOMPLETE",
+                "acceptance_ids must resolve to exactly one "
+                "valid acceptance from each agreement party.",
+            )
+
+        try:
+            activated_at = parse_utc(record["activated_at"])
+            valid_from = parse_utc(agreement["valid_from"])
+            valid_until = parse_utc(agreement["valid_until"])
+            due_at = parse_utc(term["due_at"])
+
+            accepted_dates = [
+                parse_utc(acceptance["accepted_at"])
+                for acceptance in selected_acceptances
+            ]
+        except ValueError as exc:
+            add(index, "DATETIME_PARSE", str(exc))
+        else:
+            if not valid_from <= activated_at < valid_until:
+                add(
+                    index,
+                    "ACTIVATION_TIME",
+                    "activated_at must satisfy "
+                    "valid_from <= activated_at < valid_until.",
+                )
+
+            if activated_at > due_at:
+                add(
+                    index,
+                    "ACTIVATION_AFTER_DEADLINE",
+                    "activated_at must be <= term due_at.",
+                )
+
+            if any(
+                accepted_at > activated_at
+                for accepted_at in accepted_dates
+            ):
+                add(
+                    index,
+                    "ACCEPTANCE_AFTER_ACTIVATION",
+                    "Every referenced acceptance must occur "
+                    "at or before activated_at.",
+                )
+
+        trigger = term["trigger"]
+
+        if trigger["type"] == "unconditional":
+            expected_actor = term["provider_id"]
+        else:
+            expected_actor = trigger["verifier_party_id"]
+
+        if record["activation"]["attested_by"] != expected_actor:
+            add(
+                index,
+                "ACTIVATION_ACTOR",
+                "activation.attested_by does not match "
+                "the actor required by the term trigger.",
+            )
+
+    # Agreements and partial consent remain valid without commitments.
+    # Commitment validity does not imply fulfillment or external trust.
     return issues
 
 
@@ -396,6 +625,7 @@ def run_examples(validators) -> int:
             matched_count += 1
 
         label = "PASS" if matched else "FAIL"
+
         print(
             f"[{label}] {relative_path} "
             f"codes={sorted(actual_codes)}"
@@ -406,16 +636,21 @@ def run_examples(validators) -> int:
             print_issues(issues)
 
     total = len(EXPECTED_CASES)
+
     print(
         f"{matched_count}/{total} scenarios "
         "matched expected results."
     )
+
     return 0 if matched_count == total else 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Validate ACRP agreements and acceptances."
+        description=(
+            "Validate ACRP agreements, acceptances, "
+            "and return commitments."
+        )
     )
     parser.add_argument(
         "--dataset",
@@ -428,6 +663,7 @@ def main() -> int:
     args = parser.parse_args()
 
     format_checker = FormatChecker()
+
     for required_format in ("uri", "date-time"):
         if required_format not in format_checker.checkers:
             print(
@@ -459,6 +695,7 @@ def main() -> int:
         return run_examples(validators)
 
     path = args.dataset
+
     if not path.is_absolute():
         path = ROOT / path
 
