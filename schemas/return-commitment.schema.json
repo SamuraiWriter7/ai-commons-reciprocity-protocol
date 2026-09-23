@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Return Commitment",
+  "description": "An activated return commitment bound to a specific agreement version, return term, and individual party acceptances.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type",
+    "schema_version",
+    "commitment_id",
+    "agreement",
+    "term_id",
+    "acceptance_ids",
+    "activated_at",
+    "activation"
+  ],
+  "properties": {
+    "record_type": {
+      "const": "return_commitment"
+    },
+    "schema_version": {
+      "const": "0.3.0"
+    },
+    "commitment_id": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Unique identifier of this activated commitment."
+    },
+    "agreement": {
+      "$ref": "#/$defs/agreementReference"
+    },
+    "term_id": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Identifier of the return term within the referenced agreement version."
+    },
+    "acceptance_ids": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/absoluteUri"
+      },
+      "description": "References to exactly one valid acceptance from each party of the referenced agreement."
+    },
+    "activated_at": {
+      "$ref": "#/$defs/utcDateTime"
+    },
+    "activation": {
+      "$ref": "#/$defs/activationAttestation"
+    }
+  },
+  "$defs": {
+    "absoluteUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:",
+      "minLength": 1
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "RFC 3339 UTC timestamp ending in Z."
+    },
+    "agreementReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "agreement_id",
+        "agreement_version",
+        "agreement_digest"
+      ],
+      "properties": {
+        "agreement_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "agreement_version": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Exact business version of the referenced agreement."
+        },
+        "agreement_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "Exact content digest of the referenced agreement."
+        }
+      }
+    },
+    "activationAttestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attested_by",
+        "evidence_refs"
+      ],
+      "properties": {
+        "attested_by": {
+          "$ref": "#/$defs/absoluteUri",
+          "description": "The party attesting activation: the provider for an unconditional term, or the designated verifier for an evidence-required term."
+        },
+        "evidence_refs": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/absoluteUri"
+          },
+          "description": "Evidence of activation and, where required, satisfaction of the referenced trigger condition."
+        }
+      }
+    }
+  }
+}
