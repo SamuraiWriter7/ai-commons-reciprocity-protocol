@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Fulfillment Receipt",
+  "description": "A fulfillment claim allocating a delivery slice to one commitment, with an optional beneficiary confirmation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "record_type",
+    "schema_version",
+    "receipt_id",
+    "commitment_id",
+    "issued_at",
+    "delivery",
+    "slice_start",
+    "quantity",
+    "evidence_refs",
+    "confirmation_status"
+  ],
+  "properties": {
+    "record_type": {
+      "const": "fulfillment_receipt"
+    },
+    "schema_version": {
+      "const": "0.4.0"
+    },
+    "receipt_id": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Unique identifier of this fulfillment receipt."
+    },
+    "commitment_id": {
+      "$ref": "#/$defs/absoluteUri",
+      "description": "Reference to the activated return commitment."
+    },
+    "issued_at": {
+      "$ref": "#/$defs/utcDateTime",
+      "description": "Time when the provider's fulfillment claim was issued."
+    },
+    "delivery": {
+      "$ref": "#/$defs/delivery"
+    },
+    "slice_start": {
+      "$ref": "#/$defs/nonNegativeDecimal",
+      "description": "Start offset of the allocated slice within the delivery, expressed in delivery.unit."
+    },
+    "quantity": {
+      "$ref": "#/$defs/positiveDecimal",
+      "description": "Quantity allocated to this commitment. The slice is [slice_start, slice_start + quantity)."
+    },
+    "evidence_refs": {
+      "$ref": "#/$defs/evidenceReferences",
+      "description": "Evidence supporting the provider's fulfillment claim. Evidence may be shared by multiple receipts."
+    },
+    "confirmation_status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "accepted",
+        "rejected",
+        "disputed"
+      ]
+    },
+    "confirmation": {
+      "$ref": "#/$defs/confirmation"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "confirmation_status": {
+            "const": "pending"
+          }
+        },
+        "required": [
+          "confirmation_status"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "confirmation"
+          ]
+        }
+      },
+      "else": {
+        "required": [
+          "confirmation"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "confirmation_status": {
+            "enum": [
+              "rejected",
+              "disputed"
+            ]
+          }
+        },
+        "required": [
+          "confirmation_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "confirmation": {
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "absoluteUri": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:",
+      "minLength": 1
+    },
+    "utcDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$",
+      "description": "RFC 3339 UTC timestamp ending in Z."
+    },
+    "nonNegativeDecimal": {
+      "type": "string",
+      "maxLength": 49,
+      "pattern": "^(?:0|[1-9][0-9]{0,29})(?:\\.[0-9]{1,18})?$",
+      "description": "A non-negative decimal string with up to 30 integer digits and 18 fractional digits. No exponent notation."
+    },
+    "positiveDecimal": {
+      "$ref": "#/$defs/nonNegativeDecimal",
+      "not": {
+        "pattern": "^0(?:\\.0+)?$"
+      },
+      "description": "A strictly positive decimal string."
+    },
+    "unit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "namespace",
+        "code"
+      ],
+      "properties": {
+        "namespace": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S"
+        }
+      },
+      "description": "Unit identity is the exact pair of namespace and code."
+    },
+    "evidenceReferences": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/absoluteUri"
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "delivery_id",
+        "provider_id",
+        "beneficiary_id",
+        "resource_id",
+        "unit",
+        "total_quantity",
+        "delivered_at",
+        "source_ref"
+      ],
+      "properties": {
+        "delivery_id": {
+          "$ref": "#/$defs/absoluteUri",
+          "description": "Stable identifier of the underlying delivery, reused whenever that same delivery is referenced."
+        },
+        "provider_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "beneficiary_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "resource_id": {
+          "$ref": "#/$defs/absoluteUri"
+        },
+        "unit": {
+          "$ref": "#/$defs/unit"
+        },
+        "total_quantity": {
+          "$ref": "#/$defs/positiveDecimal",
+          "description": "Total quantity of the underlying delivery, not the total quantity promised by the commitment."
+        },
+        "delivered_at": {
+          "$ref": "#/$defs/utcDateTime"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/absoluteUri",
+          "description": "Stable reference identifying the specific delivery event or line item in an external record."
+        }
+      }
+    },
+    "confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "by_party_id",
+        "confirmed_at",
+        "authority_ref",
+        "evidence_refs"
+      ],
+      "properties": {
+        "by_party_id": {
+          "$ref": "#/$defs/absoluteUri",
+          "description": "The beneficiary party recording acceptance, rejection, or dispute of the claimed slice."
+        },
+        "confirmed_at": {
+          "$ref": "#/$defs/utcDateTime",
+          "description": "Time when the beneficiary recorded the confirmation decision."
+        },
+        "authority_ref": {
+          "$ref": "#/$defs/absoluteUri",
+          "description": "Evidence of authority to make the confirmation decision on behalf of the beneficiary."
+        },
+        "evidence_refs": {
+          "$ref": "#/$defs/evidenceReferences",
+          "description": "Evidence supporting the beneficiary's confirmation decision."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "\\S",
+          "description": "Required for rejected or disputed claims; optional for accepted claims."
+        }
+      }
+    }
+  }
+}
