@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Validate ACRP agreements, acceptances, and return commitments."""
-
-from __future__ import annotations
+"""Validate reciprocity protocol examples and self-contained datasets."""
 
 import argparse
 import hashlib
 import json
+import re
 import sys
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -27,44 +27,63 @@ SCHEMA_PATHS = {
     "return_commitment": (
         "schemas/return-commitment.schema.json"
     ),
+    "fulfillment_receipt": (
+        "schemas/fulfillment-receipt.schema.json"
+    ),
 }
 
-# Each file is an independent validation case.
 EXPECTED_CASES = {
     "examples/pass/reciprocity-agreement-basic.example.json": set(),
     "examples/fail/reciprocity-agreement-digest-mismatch.example.json": {
-        "DIGEST_MISMATCH"
+        "DIGEST_MISMATCH",
     },
     "examples/fail/reciprocity-agreement-duplicate-term-id.example.json": {
-        "DUPLICATE_TERM_ID"
+        "DUPLICATE_TERM_ID",
     },
     "examples/pass/agreement-acceptance-basic.example.json": set(),
     "examples/fail/agreement-acceptance-wrong-digest.example.json": {
-        "ACCEPTANCE_DIGEST_MISMATCH"
+        "ACCEPTANCE_DIGEST_MISMATCH",
     },
     "examples/pass/return-commitment-basic.example.json": set(),
     "examples/fail/return-commitment-wrong-activation-actor.example.json": {
-        "ACTIVATION_ACTOR"
+        "ACTIVATION_ACTOR",
+    },
+    "examples/pass/fulfillment-receipt-partial.example.json": set(),
+    "examples/fail/fulfillment-receipt-wrong-confirmation-actor.example.json": {
+        "CONFIRMATION_ACTOR",
     },
 }
+
+PARTIAL_EXAMPLE = (
+    "examples/pass/fulfillment-receipt-partial.example.json"
+)
+
+QUANTITY_SCALE = 10**18
+
+UTC_PATTERN = re.compile(
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?:\.(\d+))?Z$"
+)
+
+QUANTITY_PATTERN = re.compile(
+    r"^(?:0|[1-9][0-9]{0,29})(?:\.[0-9]{1,18})?$"
+)
 
 
 def reject_duplicate_keys(pairs):
     result = {}
-
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"Duplicate JSON property: {key!r}")
+            raise ValueError(f"Duplicate JSON property: {key}")
         result[key] = value
-
     return result
 
 
 def reject_nonfinite_number(value):
-    raise ValueError(f"Invalid JSON numeric constant: {value}")
+    raise ValueError(f"Non-finite JSON number: {value}")
 
 
-def read_json(path: Path):
+def read_json(path):
     with path.open("r", encoding="utf-8") as handle:
         return json.load(
             handle,
@@ -73,35 +92,69 @@ def read_json(path: Path):
         )
 
 
-def json_pointer(parts) -> str:
-    tokens = [
+def json_pointer(parts):
+    escaped = [
         str(part).replace("~", "~0").replace("/", "~1")
         for part in parts
     ]
-    return "/" + "/".join(tokens) if tokens else "(root)"
+    return "/" + "/".join(escaped) if escaped else "(root)"
 
 
-def parse_utc(value: str) -> datetime:
-    # Schema validation has already required a UTC timestamp ending in Z.
-    return datetime.fromisoformat(value[:-1] + "+00:00")
+def parse_utc(value):
+    """Return an exactly comparable UTC timestamp, including fractions."""
+    match = UTC_PATTERN.fullmatch(value)
+    if match is None:
+        raise ValueError(f"Unsupported UTC timestamp: {value}")
+
+    seconds = datetime.strptime(
+        match.group(1),
+        "%Y-%m-%dT%H:%M:%S",
+    )
+
+    # Strip trailing zeros so equal fractions have equal representations.
+    # Lexicographic comparison then preserves fractional time ordering.
+    fraction = (match.group(2) or "").rstrip("0")
+    return seconds, fraction
 
 
-def agreement_key(record):
+def quantity_to_int(value):
+    """Convert a decimal quantity into exact units of 10^-18."""
+    if QUANTITY_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"Unsupported decimal quantity: {value}")
+
+    whole, separator, fraction = value.partition(".")
+    if not separator:
+        fraction = ""
+
     return (
-        record["agreement_id"],
-        record["agreement_version"],
+        int(whole) * QUANTITY_SCALE
+        + int(fraction.ljust(18, "0"))
     )
 
 
-def schema_issues(record, validator):
+def format_quantity(value):
+    sign = "-" if value < 0 else ""
+    whole, fraction = divmod(abs(value), QUANTITY_SCALE)
+
+    if fraction == 0:
+        return f"{sign}{whole}"
+
+    fractional_text = f"{fraction:018d}".rstrip("0")
+    return f"{sign}{whole}.{fractional_text}"
+
+
+def agreement_key(record):
+    return record["agreement_id"], record["agreement_version"]
+
+
+def schema_issues(document, validator):
     errors = sorted(
-        validator.iter_errors(record),
+        validator.iter_errors(document),
         key=lambda error: (
             json_pointer(error.absolute_path),
             error.message,
         ),
     )
-
     return [
         (
             "SCHEMA",
@@ -111,205 +164,168 @@ def schema_issues(record, validator):
     ]
 
 
-def validate_agreement(document):
-    """Check relationships after successful schema validation."""
+def extract_records(document):
+    if not isinstance(document, dict):
+        raise ValueError("The document must be a JSON object.")
+
+    if "records" not in document:
+        return [document]
+
+    if set(document) != {"records"}:
+        raise ValueError(
+            "A dataset container may contain only 'records'."
+        )
+
+    records = document["records"]
+    if not isinstance(records, list) or not records:
+        raise ValueError("'records' must be a non-empty array.")
+
+    return records
+
+
+def validate_agreement(record):
     issues = []
+    parties = set(record["parties"])
+    seen_terms = set()
 
-    def add(code, message):
-        issues.append((code, message))
+    for term in record["terms"]:
+        term_id = term["term_id"]
 
-    parties = set(document["parties"])
-    seen_term_ids = set()
-
-    for index, term in enumerate(document["terms"]):
-        location = f"/terms/{index}"
-
-        if term["term_id"] in seen_term_ids:
-            add(
+        if term_id in seen_terms:
+            issues.append((
                 "DUPLICATE_TERM_ID",
-                f"{location}/term_id duplicates another term.",
-            )
-        seen_term_ids.add(term["term_id"])
+                f"Repeated term_id: {term_id}",
+            ))
+        seen_terms.add(term_id)
 
         for field in ("provider_id", "beneficiary_id"):
             if term[field] not in parties:
-                add(
+                issues.append((
                     "PARTY_NOT_FOUND",
-                    f"{location}/{field} is not in parties.",
-                )
+                    f"{term_id}: {field} is not an agreement party.",
+                ))
 
         if term["provider_id"] == term["beneficiary_id"]:
-            add(
+            issues.append((
                 "SAME_PROVIDER_BENEFICIARY",
-                f"{location}: provider and beneficiary must differ.",
-            )
+                f"{term_id}: provider and beneficiary must differ.",
+            ))
 
         trigger = term["trigger"]
-
-        if trigger["type"] == "evidence_required":
-            if trigger["verifier_party_id"] not in parties:
-                add(
-                    "VERIFIER_NOT_FOUND",
-                    f"{location}/trigger/verifier_party_id "
-                    "is not in parties.",
-                )
+        if (
+            trigger["type"] == "evidence_required"
+            and trigger["verifier_party_id"] not in parties
+        ):
+            issues.append((
+                "VERIFIER_NOT_FOUND",
+                f"{term_id}: verifier is not an agreement party.",
+            ))
 
     try:
-        created_at = parse_utc(document["created_at"])
-        valid_from = parse_utc(document["valid_from"])
-        valid_until = parse_utc(document["valid_until"])
-        due_dates = [
-            parse_utc(term["due_at"])
-            for term in document["terms"]
-        ]
-    except ValueError as exc:
-        add("DATETIME_PARSE", str(exc))
-    else:
-        if created_at > valid_from:
-            add(
-                "AGREEMENT_TIME",
-                "created_at must be <= valid_from.",
-            )
+        created = parse_utc(record["created_at"])
+        valid_from = parse_utc(record["valid_from"])
+        valid_until = parse_utc(record["valid_until"])
 
-        if valid_from >= valid_until:
-            add(
+        if not created <= valid_from < valid_until:
+            issues.append((
                 "AGREEMENT_TIME",
-                "valid_from must be < valid_until.",
-            )
+                "Expected created_at <= valid_from < valid_until.",
+            ))
 
-        for index, due_at in enumerate(due_dates):
-            if due_at < valid_from:
-                add(
+        for term in record["terms"]:
+            if parse_utc(term["due_at"]) < valid_from:
+                issues.append((
                     "TERM_DEADLINE",
-                    f"/terms/{index}/due_at must be >= valid_from.",
-                )
+                    f"{term['term_id']}: due_at precedes valid_from.",
+                ))
+    except ValueError as exc:
+        issues.append(("DATETIME_PARSE", str(exc)))
 
     payload = {
         key: value
-        for key, value in document.items()
+        for key, value in record.items()
         if key != "agreement_digest"
     }
 
     try:
-        canonical_bytes = rfc8785.dumps(payload)
-    except rfc8785.CanonicalizationError as exc:
-        add("CANONICALIZATION", str(exc))
-    else:
-        calculated_digest = (
-            "sha256:"
-            + hashlib.sha256(canonical_bytes).hexdigest()
+        canonical = rfc8785.dumps(payload)
+        calculated = (
+            "sha256:" + hashlib.sha256(canonical).hexdigest()
         )
-
-        if document["agreement_digest"] != calculated_digest:
-            add(
+        if record["agreement_digest"] != calculated:
+            issues.append((
                 "DIGEST_MISMATCH",
-                "Stored digest does not match agreement content. "
-                f"Calculated: {calculated_digest}",
-            )
+                f"Expected agreement_digest: {calculated}",
+            ))
+    except rfc8785.CanonicalizationError as exc:
+        issues.append(("CANONICALIZATION", str(exc)))
 
     return issues
 
 
 def validate_acceptance(record, agreement):
-    """Compare an acceptance with one valid, unambiguous agreement."""
     issues = []
 
     if (
         record["agreement"]["agreement_digest"]
         != agreement["agreement_digest"]
     ):
-        issues.append(
-            (
-                "ACCEPTANCE_DIGEST_MISMATCH",
-                "Acceptance digest does not match "
-                "the referenced agreement.",
-            )
-        )
+        issues.append((
+            "ACCEPTANCE_DIGEST_MISMATCH",
+            "Acceptance digest does not match the agreement.",
+        ))
 
     if record["party_id"] not in agreement["parties"]:
-        issues.append(
-            (
-                "ACCEPTANCE_PARTY_NOT_FOUND",
-                "Acceptance party_id is not in agreement parties.",
-            )
-        )
+        issues.append((
+            "ACCEPTANCE_PARTY_NOT_FOUND",
+            "Accepting party is not an agreement party.",
+        ))
 
     try:
-        accepted_at = parse_utc(record["accepted_at"])
-        created_at = parse_utc(agreement["created_at"])
+        accepted = parse_utc(record["accepted_at"])
+        created = parse_utc(agreement["created_at"])
         valid_until = parse_utc(agreement["valid_until"])
+
+        if not created <= accepted < valid_until:
+            issues.append((
+                "ACCEPTANCE_TIME",
+                "Expected created_at <= accepted_at < valid_until.",
+            ))
     except ValueError as exc:
         issues.append(("DATETIME_PARSE", str(exc)))
-    else:
-        if not created_at <= accepted_at < valid_until:
-            issues.append(
-                (
-                    "ACCEPTANCE_TIME",
-                    "accepted_at must satisfy "
-                    "created_at <= accepted_at < valid_until.",
-                )
-            )
 
     return issues
 
 
-def extract_records(document):
-    if not isinstance(document, dict):
-        raise ValueError("Input must be a JSON object.")
-
-    if "records" not in document:
-        # Preserve support for standalone records.
-        return [document]
-
-    if set(document) != {"records"}:
-        raise ValueError(
-            "A record-set container must contain only records."
-        )
-
-    records = document["records"]
-
-    if not isinstance(records, list) or not records:
-        raise ValueError("records must be a non-empty array.")
-
-    return records
-
-
 def validate_document(document, validators):
+    """Return (issues, summaries); invalid datasets have no summaries."""
     try:
         records = extract_records(document)
     except ValueError as exc:
-        return [("INPUT_ERROR", str(exc))]
+        return [("INPUT_ERROR", str(exc))], []
 
     issues = []
     invalid_indices = set()
 
-    def append_at(index, found):
-        if found:
-            invalid_indices.add(index)
-
-        for code, message in found:
-            issues.append((code, f"record[{index}] {message}"))
-
     def add(index, code, message):
-        append_at(index, [(code, message)])
+        invalid_indices.add(index)
+        issues.append((code, f"record[{index}]: {message}"))
 
-    # Validate structures before accessing fields.
+    def append_at(index, found):
+        for code, message in found:
+            add(index, code, message)
+
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             add(index, "SCHEMA", "Record must be an object.")
             continue
 
         record_type = record.get("record_type")
-
         if (
             not isinstance(record_type, str)
             or record_type not in validators
         ):
-            add(
-                index,
-                "SCHEMA",
-                "Missing or unsupported record_type.",
-            )
+            add(index, "SCHEMA", "Unsupported record_type.")
             continue
 
         append_at(
@@ -317,127 +333,103 @@ def validate_document(document, validators):
             schema_issues(record, validators[record_type]),
         )
 
+    # Semantic validation assumes every record is schema-valid.
     if issues:
-        return issues
+        return issues, []
 
-    # Build complete indexes before resolving any references.
-    agreements = {}
-    acceptances = {}
-    party_acceptances = {}
-    commitments = {}
-    term_commitments = {}
+    agreements = defaultdict(list)
+    acceptances = defaultdict(list)
+    party_acceptances = defaultdict(list)
+    commitments = defaultdict(list)
+    term_commitments = defaultdict(list)
+    receipts = defaultdict(list)
 
     for index, record in enumerate(records):
         record_type = record["record_type"]
 
         if record_type == "reciprocity_agreement":
-            key = agreement_key(record)
-            agreements.setdefault(key, []).append(index)
+            agreements[agreement_key(record)].append(index)
 
         elif record_type == "agreement_acceptance":
-            acceptance_id = record["acceptance_id"]
-            acceptances.setdefault(acceptance_id, []).append(index)
-
+            acceptances[record["acceptance_id"]].append(index)
             key = (
                 *agreement_key(record["agreement"]),
                 record["party_id"],
             )
-            party_acceptances.setdefault(key, []).append(index)
+            party_acceptances[key].append(index)
 
         elif record_type == "return_commitment":
-            commitment_id = record["commitment_id"]
-            commitments.setdefault(commitment_id, []).append(index)
-
+            commitments[record["commitment_id"]].append(index)
             key = (
                 *agreement_key(record["agreement"]),
                 record["term_id"],
             )
-            term_commitments.setdefault(key, []).append(index)
+            term_commitments[key].append(index)
 
-    def reject_duplicates(groups, code, message):
-        for indices in groups.values():
+        elif record_type == "fulfillment_receipt":
+            receipts[record["receipt_id"]].append(index)
+
+    def reject_duplicates(groups, code):
+        for key, indices in groups.items():
             if len(indices) > 1:
                 for index in indices:
-                    add(index, code, message)
+                    add(index, code, f"Duplicate identity: {key}")
 
-    # Mark every member of a duplicate group as invalid.
-    reject_duplicates(
-        agreements,
-        "DUPLICATE_AGREEMENT",
-        "agreement_id and agreement_version must be unique.",
-    )
-    reject_duplicates(
-        acceptances,
-        "DUPLICATE_ACCEPTANCE_ID",
-        "acceptance_id duplicates another acceptance.",
-    )
+    reject_duplicates(agreements, "DUPLICATE_AGREEMENT")
+    reject_duplicates(acceptances, "DUPLICATE_ACCEPTANCE_ID")
     reject_duplicates(
         party_acceptances,
         "DUPLICATE_PARTY_ACCEPTANCE",
-        "The same party has multiple acceptances "
-        "for the same agreement version.",
     )
-    reject_duplicates(
-        commitments,
-        "DUPLICATE_COMMITMENT_ID",
-        "commitment_id duplicates another commitment.",
-    )
+    reject_duplicates(commitments, "DUPLICATE_COMMITMENT_ID")
     reject_duplicates(
         term_commitments,
         "DUPLICATE_TERM_COMMITMENT",
-        "The same agreement version and term "
-        "have multiple commitments.",
     )
+    reject_duplicates(receipts, "DUPLICATE_RECEIPT_ID")
 
-    # Validate all agreements before acceptances or commitments.
-    for indices in agreements.values():
-        for index in indices:
-            append_at(index, validate_agreement(records[index]))
+    for index, record in enumerate(records):
+        if record["record_type"] == "reciprocity_agreement":
+            append_at(index, validate_agreement(record))
 
     def resolve_agreement(index, reference):
-        candidates = agreements.get(agreement_key(reference), [])
+        matches = agreements.get(agreement_key(reference), [])
 
-        if not candidates:
-            add(
-                index,
-                "MISSING_AGREEMENT",
-                "No agreement matches the referenced ID and version.",
-            )
+        if not matches:
+            add(index, "MISSING_AGREEMENT", "Agreement not found.")
             return None
 
-        if len(candidates) != 1:
+        if len(matches) != 1:
             add(
                 index,
                 "AMBIGUOUS_AGREEMENT",
-                "Multiple agreements match "
-                "the referenced ID and version.",
+                "Agreement reference is not unique.",
             )
             return None
 
-        agreement_index = candidates[0]
-
-        if agreement_index in invalid_indices:
+        target = matches[0]
+        if target in invalid_indices:
             add(
                 index,
                 "INVALID_REFERENCED_AGREEMENT",
-                "The referenced agreement failed validation.",
+                "Referenced agreement is invalid.",
             )
             return None
 
-        return records[agreement_index]
+        return records[target]
 
-    # Finish validating every acceptance before using it for activation.
     for index, record in enumerate(records):
         if record["record_type"] != "agreement_acceptance":
             continue
 
         agreement = resolve_agreement(index, record["agreement"])
-
         if agreement is not None:
             append_at(
                 index,
                 validate_acceptance(record, agreement),
             )
+
+    commitment_terms = {}
 
     for index, record in enumerate(records):
         if record["record_type"] != "return_commitment":
@@ -445,7 +437,6 @@ def validate_document(document, validators):
 
         reference = record["agreement"]
         agreement = resolve_agreement(index, reference)
-
         if agreement is None:
             continue
 
@@ -456,33 +447,29 @@ def validate_document(document, validators):
             add(
                 index,
                 "COMMITMENT_DIGEST_MISMATCH",
-                "Commitment digest does not match "
-                "the referenced agreement.",
+                "Commitment digest does not match the agreement.",
             )
             continue
 
-        matching_terms = [
-            term
-            for term in agreement["terms"]
-            if term["term_id"] == record["term_id"]
-        ]
-
-        if not matching_terms:
-            add(
-                index,
-                "MISSING_TERM",
-                "term_id is not in the referenced agreement.",
-            )
+        term = next(
+            (
+                item
+                for item in agreement["terms"]
+                if item["term_id"] == record["term_id"]
+            ),
+            None,
+        )
+        if term is None:
+            add(index, "MISSING_TERM", "Referenced term not found.")
             continue
 
-        # A validated agreement guarantees term_id uniqueness.
-        term = matching_terms[0]
-        selected_acceptances = []
+        commitment_terms[index] = term
+        selected = []
 
         for acceptance_id in record["acceptance_ids"]:
-            candidates = acceptances.get(acceptance_id, [])
+            matches = acceptances.get(acceptance_id, [])
 
-            if not candidates:
+            if not matches:
                 add(
                     index,
                     "MISSING_ACCEPTANCE",
@@ -490,120 +477,321 @@ def validate_document(document, validators):
                 )
                 continue
 
-            if len(candidates) != 1:
+            if len(matches) != 1:
                 add(
                     index,
                     "AMBIGUOUS_ACCEPTANCE",
-                    f"Acceptance ID is not unique: {acceptance_id}",
+                    f"Acceptance is not unique: {acceptance_id}",
                 )
                 continue
 
-            acceptance_index = candidates[0]
-
-            if acceptance_index in invalid_indices:
+            target = matches[0]
+            if target in invalid_indices:
                 add(
                     index,
                     "INVALID_REFERENCED_ACCEPTANCE",
-                    f"Acceptance failed validation: {acceptance_id}",
+                    f"Acceptance is invalid: {acceptance_id}",
                 )
                 continue
 
-            acceptance = records[acceptance_index]
-
-            # Schemas require the same three reference fields.
+            acceptance = records[target]
             if acceptance["agreement"] != reference:
                 add(
                     index,
                     "COMMITMENT_ACCEPTANCE_BINDING",
-                    "Referenced acceptance targets "
-                    f"a different agreement: {acceptance_id}",
+                    "Acceptance refers to a different agreement "
+                    "ID, version, or digest.",
                 )
                 continue
 
-            selected_acceptances.append(acceptance)
+            selected.append(acceptance)
 
         accepted_parties = [
-            acceptance["party_id"]
-            for acceptance in selected_acceptances
+            item["party_id"] for item in selected
         ]
-        required_parties = set(agreement["parties"])
-
         if (
-            len(selected_acceptances) != len(record["acceptance_ids"])
+            len(selected) != len(record["acceptance_ids"])
             or len(accepted_parties) != len(set(accepted_parties))
-            or set(accepted_parties) != required_parties
+            or set(accepted_parties) != set(agreement["parties"])
         ):
             add(
                 index,
                 "CONSENT_INCOMPLETE",
-                "acceptance_ids must resolve to exactly one "
-                "valid acceptance from each agreement party.",
+                "Acceptances must cover every agreement party "
+                "exactly once.",
             )
 
         try:
-            activated_at = parse_utc(record["activated_at"])
+            activated = parse_utc(record["activated_at"])
             valid_from = parse_utc(agreement["valid_from"])
             valid_until = parse_utc(agreement["valid_until"])
-            due_at = parse_utc(term["due_at"])
+            due = parse_utc(term["due_at"])
 
-            accepted_dates = [
-                parse_utc(acceptance["accepted_at"])
-                for acceptance in selected_acceptances
-            ]
-        except ValueError as exc:
-            add(index, "DATETIME_PARSE", str(exc))
-        else:
-            if not valid_from <= activated_at < valid_until:
+            if not valid_from <= activated < valid_until:
                 add(
                     index,
                     "ACTIVATION_TIME",
-                    "activated_at must satisfy "
-                    "valid_from <= activated_at < valid_until.",
+                    "Activation must fall within the agreement's "
+                    "activation period.",
                 )
 
-            if activated_at > due_at:
+            if activated > due:
                 add(
                     index,
                     "ACTIVATION_AFTER_DEADLINE",
-                    "activated_at must be <= term due_at.",
+                    "Activation occurs after the term deadline.",
                 )
 
             if any(
-                accepted_at > activated_at
-                for accepted_at in accepted_dates
+                parse_utc(item["accepted_at"]) > activated
+                for item in selected
             ):
                 add(
                     index,
                     "ACCEPTANCE_AFTER_ACTIVATION",
-                    "Every referenced acceptance must occur "
-                    "at or before activated_at.",
+                    "Acceptance occurs after activation.",
                 )
+        except ValueError as exc:
+            add(index, "DATETIME_PARSE", str(exc))
 
         trigger = term["trigger"]
-
-        if trigger["type"] == "unconditional":
-            expected_actor = term["provider_id"]
-        else:
-            expected_actor = trigger["verifier_party_id"]
-
+        expected_actor = (
+            term["provider_id"]
+            if trigger["type"] == "unconditional"
+            else trigger["verifier_party_id"]
+        )
         if record["activation"]["attested_by"] != expected_actor:
             add(
                 index,
                 "ACTIVATION_ACTOR",
-                "activation.attested_by does not match "
-                "the actor required by the term trigger.",
+                f"Expected activation actor: {expected_actor}",
             )
 
-    # Agreements and partial consent remain valid without commitments.
-    # Commitment validity does not imply fulfillment or external trust.
-    return issues
+    delivery_groups = defaultdict(list)
+    receipt_targets = {}
+
+    for index, record in enumerate(records):
+        if record["record_type"] != "fulfillment_receipt":
+            continue
+
+        delivery = record["delivery"]
+        delivery_groups[delivery["delivery_id"]].append(index)
+
+        matches = commitments.get(record["commitment_id"], [])
+
+        if not matches:
+            add(
+                index,
+                "MISSING_COMMITMENT",
+                "Referenced commitment not found.",
+            )
+            continue
+
+        if len(matches) != 1:
+            add(
+                index,
+                "AMBIGUOUS_COMMITMENT",
+                "Referenced commitment is not unique.",
+            )
+            continue
+
+        target = matches[0]
+        if target in invalid_indices:
+            add(
+                index,
+                "INVALID_REFERENCED_COMMITMENT",
+                "Referenced commitment is invalid.",
+            )
+            continue
+
+        commitment = records[target]
+        term = commitment_terms[target]
+        receipt_targets[index] = target
+
+        for field in (
+            "provider_id",
+            "beneficiary_id",
+            "resource_id",
+            "unit",
+        ):
+            if delivery[field] != term[field]:
+                add(
+                    index,
+                    "DELIVERY_TERM_MISMATCH",
+                    f"delivery.{field} does not match the term.",
+                )
+
+        start = quantity_to_int(record["slice_start"])
+        quantity = quantity_to_int(record["quantity"])
+        total = quantity_to_int(delivery["total_quantity"])
+
+        if (
+            start < 0
+            or quantity <= 0
+            or total <= 0
+            or start + quantity > total
+        ):
+            add(
+                index,
+                "DELIVERY_SLICE_BOUNDS",
+                "The allocated slice must be positive and fit "
+                "within the delivery total.",
+            )
+
+        try:
+            activated = parse_utc(commitment["activated_at"])
+            delivered = parse_utc(delivery["delivered_at"])
+            issued = parse_utc(record["issued_at"])
+
+            if not activated <= delivered <= issued:
+                add(
+                    index,
+                    "RECEIPT_TIME",
+                    "Expected activated_at <= delivered_at "
+                    "<= issued_at.",
+                )
+
+            confirmation = record.get("confirmation")
+            if confirmation is not None:
+                confirmed = parse_utc(confirmation["confirmed_at"])
+                if confirmed < issued:
+                    add(
+                        index,
+                        "CONFIRMATION_TIME",
+                        "confirmed_at must not precede issued_at.",
+                    )
+        except ValueError as exc:
+            add(index, "DATETIME_PARSE", str(exc))
+
+        confirmation = record.get("confirmation")
+        if (
+            confirmation is not None
+            and confirmation["by_party_id"] != term["beneficiary_id"]
+        ):
+            add(
+                index,
+                "CONFIRMATION_ACTOR",
+                "Confirmation actor must be the term beneficiary.",
+            )
+
+    # Evidence references may be reused. Delivery allocations may not.
+    # All statuses reserve their slices, including rejected/disputed.
+    for delivery_id, indices in delivery_groups.items():
+        baseline = records[indices[0]]["delivery"]
+
+        if any(
+            records[index]["delivery"] != baseline
+            for index in indices[1:]
+        ):
+            for index in indices:
+                add(
+                    index,
+                    "DELIVERY_METADATA_MISMATCH",
+                    f"Inconsistent metadata for {delivery_id}.",
+                )
+
+        intervals = []
+        for index in indices:
+            record = records[index]
+            start = quantity_to_int(record["slice_start"])
+            end = start + quantity_to_int(record["quantity"])
+            intervals.append((start, end, index))
+
+        intervals.sort()
+        furthest_end = None
+        furthest_index = None
+        overlapping_indices = set()
+
+        for start, end, index in intervals:
+            if furthest_end is not None and start < furthest_end:
+                overlapping_indices.add(index)
+                overlapping_indices.add(furthest_index)
+
+            if furthest_end is None or end > furthest_end:
+                furthest_end = end
+                furthest_index = index
+
+        for index in sorted(overlapping_indices):
+            add(
+                index,
+                "DELIVERY_SLICE_OVERLAP",
+                f"Overlapping allocation for {delivery_id}.",
+            )
+
+    # Do not publish definitive totals for an invalid record set.
+    if issues:
+        return issues, []
+
+    totals = {}
+    for index, term in commitment_terms.items():
+        totals[index] = {
+            "pending": 0,
+            "accepted": 0,
+            "rejected": 0,
+            "disputed": 0,
+        }
+
+    for receipt_index, target in receipt_targets.items():
+        record = records[receipt_index]
+        totals[target][record["confirmation_status"]] += (
+            quantity_to_int(record["quantity"])
+        )
+
+    summaries = []
+
+    for index, term in commitment_terms.items():
+        record = records[index]
+        quantities = totals[index]
+        promised = quantity_to_int(term["quantity"])
+        accepted = quantities["accepted"]
+
+        if accepted > promised:
+            add(
+                index,
+                "ACCEPTED_QUANTITY_EXCEEDED",
+                "Accepted quantity exceeds the commitment quantity.",
+            )
+            continue
+
+        if accepted == 0:
+            status = "unfulfilled"
+        elif accepted < promised:
+            status = "partial"
+        else:
+            status = "fulfilled"
+
+        summaries.append({
+            "commitment_id": record["commitment_id"],
+            "unit": term["unit"],
+            "promised_quantity": format_quantity(promised),
+            "accepted_quantity": format_quantity(accepted),
+            "remaining_quantity": format_quantity(
+                promised - accepted
+            ),
+            "pending_quantity": format_quantity(
+                quantities["pending"]
+            ),
+            "rejected_quantity": format_quantity(
+                quantities["rejected"]
+            ),
+            "disputed_quantity": format_quantity(
+                quantities["disputed"]
+            ),
+            "status": status,
+        })
+
+    if issues:
+        return issues, []
+
+    summaries.sort(key=lambda item: item["commitment_id"])
+    return [], summaries
 
 
-def validate_file(path: Path, validators):
+def validate_file(path, validators):
     try:
         document = read_json(path)
     except (OSError, ValueError, UnicodeError) as exc:
-        return [("INPUT_ERROR", str(exc))]
+        return [("INPUT_ERROR", str(exc))], []
 
     return validate_document(document, validators)
 
@@ -613,101 +801,133 @@ def print_issues(issues):
         print(f"  {code}: {message}")
 
 
-def run_examples(validators) -> int:
-    matched_count = 0
+def print_summaries(summaries):
+    for summary in summaries:
+        print(
+            "  SUMMARY "
+            + json.dumps(summary, ensure_ascii=False, sort_keys=True)
+        )
+
+
+def partial_summary_matches(summaries):
+    if len(summaries) != 1:
+        return False
+
+    expected = {
+        "commitment_id": (
+            "urn:example:commitment:compute-100-hours-001"
+        ),
+        "unit": {
+            "namespace": "urn:example:unit:compute-service-a-v1",
+            "code": "HOUR",
+        },
+        "promised_quantity": "100",
+        "accepted_quantity": "40",
+        "remaining_quantity": "60",
+        "pending_quantity": "0",
+        "rejected_quantity": "0",
+        "disputed_quantity": "0",
+        "status": "partial",
+    }
+    return summaries[0] == expected
+
+
+def run_examples(validators):
+    passed = 0
 
     for relative_path, expected_codes in EXPECTED_CASES.items():
-        issues = validate_file(ROOT / relative_path, validators)
+        issues, summaries = validate_file(
+            ROOT / relative_path,
+            validators,
+        )
         actual_codes = {code for code, _ in issues}
-        matched = actual_codes == expected_codes
+        success = actual_codes == expected_codes
 
-        if matched:
-            matched_count += 1
+        if relative_path == PARTIAL_EXAMPLE:
+            success = success and partial_summary_matches(summaries)
 
-        label = "PASS" if matched else "FAIL"
-
+        label = "PASS" if success else "FAIL"
         print(
             f"[{label}] {relative_path} "
             f"codes={sorted(actual_codes)}"
         )
 
-        if not matched:
-            print(f"  Expected: {sorted(expected_codes)}")
+        if success:
+            passed += 1
+        else:
+            print(f"  Expected codes: {sorted(expected_codes)}")
             print_issues(issues)
 
+            if relative_path == PARTIAL_EXAMPLE:
+                print(
+                    "  Expected summary: promised=100, accepted=40, "
+                    "remaining=60, status=partial."
+                )
+                print_summaries(summaries)
+
     total = len(EXPECTED_CASES)
-
-    print(
-        f"{matched_count}/{total} scenarios "
-        "matched expected results."
-    )
-
-    return 0 if matched_count == total else 1
+    print(f"\n{passed}/{total} examples passed.")
+    return 0 if passed == total else 1
 
 
-def main() -> int:
+def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Validate ACRP agreements, acceptances, "
-            "and return commitments."
+            "Validate bundled examples or a self-contained "
+            "reciprocity protocol dataset."
         )
     )
     parser.add_argument(
         "--dataset",
         type=Path,
         help=(
-            "Validate one JSON record or record-set file. "
-            "Relative paths are resolved from the repository root."
+            "Validate one JSON file. Relative paths are resolved "
+            "from the repository root."
         ),
     )
     args = parser.parse_args()
 
-    format_checker = FormatChecker()
-
+    checker = FormatChecker()
     for required_format in ("uri", "date-time"):
-        if required_format not in format_checker.checkers:
+        if required_format not in checker.checkers:
             print(
-                f"Missing format support: {required_format}. "
-                "Install dependencies from requirements.txt.",
+                f"SETUP_ERROR: Missing format checker: "
+                f"{required_format}",
                 file=sys.stderr,
             )
             return 2
 
     validators = {}
 
-    for record_type, relative_path in SCHEMA_PATHS.items():
-        try:
+    try:
+        for record_type, relative_path in SCHEMA_PATHS.items():
             schema = read_json(ROOT / relative_path)
             Draft202012Validator.check_schema(schema)
-        except (OSError, ValueError, UnicodeError, SchemaError) as exc:
-            print(
-                f"Schema setup failed ({relative_path}): {exc}",
-                file=sys.stderr,
+            validators[record_type] = Draft202012Validator(
+                schema,
+                format_checker=checker,
             )
-            return 2
-
-        validators[record_type] = Draft202012Validator(
-            schema,
-            format_checker=format_checker,
-        )
+    except (OSError, ValueError, UnicodeError, SchemaError) as exc:
+        print(f"SETUP_ERROR: {exc}", file=sys.stderr)
+        return 2
 
     if args.dataset is None:
         return run_examples(validators)
 
-    path = args.dataset
+    dataset_path = args.dataset
+    if not dataset_path.is_absolute():
+        dataset_path = ROOT / dataset_path
 
-    if not path.is_absolute():
-        path = ROOT / path
-
-    issues = validate_file(path, validators)
-    codes = sorted({code for code, _ in issues})
+    issues, summaries = validate_file(dataset_path, validators)
 
     if issues:
-        print(f"[INVALID] {args.dataset} codes={codes}")
+        codes = sorted({code for code, _ in issues})
+        print(f"INVALID codes={codes}")
         print_issues(issues)
         return 1
 
-    print(f"[VALID] {args.dataset}")
+    print("VALID")
+    print_summaries(summaries)
     return 0
 
 
