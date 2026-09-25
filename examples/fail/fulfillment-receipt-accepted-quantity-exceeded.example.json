@@ -1,0 +1,174 @@
+{
+  "records": [
+    {
+      "record_type": "reciprocity_agreement",
+      "schema_version": "0.1.0",
+      "agreement_id": "urn:example:agreement:ai-collaboration-001",
+      "agreement_version": "1.0.0",
+      "project_ref": "urn:example:project:community-ai-001",
+      "created_at": "2026-09-21T00:00:00Z",
+      "valid_from": "2026-10-01T00:00:00Z",
+      "valid_until": "2027-04-01T00:00:00Z",
+      "parties": [
+        "urn:example:organization:compute-provider",
+        "urn:example:organization:community-lab"
+      ],
+      "terms": [
+        {
+          "term_id": "urn:example:term:compute-100-hours",
+          "provider_id": "urn:example:organization:compute-provider",
+          "beneficiary_id": "urn:example:organization:community-lab",
+          "resource_id": "urn:example:resource:compute-service-a-v1",
+          "description": "Provide 100 hours of compute service A under its fixed v1 service specification.",
+          "quantity": "100",
+          "unit": {
+            "namespace": "urn:example:unit:compute-service-a-v1",
+            "code": "HOUR"
+          },
+          "trigger": {
+            "type": "unconditional"
+          },
+          "due_at": "2027-03-31T23:59:59Z",
+          "confirmation_method_ref": "urn:example:procedure:compute-usage-confirmation:v1"
+        },
+        {
+          "term_id": "urn:example:term:training-20-seats",
+          "provider_id": "urn:example:organization:compute-provider",
+          "beneficiary_id": "urn:example:organization:community-lab",
+          "resource_id": "urn:example:resource:ai-training-course-a-v1",
+          "description": "Provide 20 participant seats in AI training course A under its fixed v1 course specification.",
+          "quantity": "20",
+          "unit": {
+            "namespace": "urn:example:unit:ai-training-course-a-v1",
+            "code": "SEAT"
+          },
+          "trigger": {
+            "type": "unconditional"
+          },
+          "due_at": "2027-03-31T23:59:59Z",
+          "confirmation_method_ref": "urn:example:procedure:training-receipt-confirmation:v1"
+        }
+      ],
+      "external_refs": [],
+      "agreement_digest": "sha256:25bda0a93c55051d217b40f84801d61bf05368e74db21bf5c13146198c33c1a4"
+    },
+    {
+      "record_type": "agreement_acceptance",
+      "schema_version": "0.2.0",
+      "acceptance_id": "urn:example:acceptance:compute-provider-001",
+      "agreement": {
+        "agreement_id": "urn:example:agreement:ai-collaboration-001",
+        "agreement_version": "1.0.0",
+        "agreement_digest": "sha256:25bda0a93c55051d217b40f84801d61bf05368e74db21bf5c13146198c33c1a4"
+      },
+      "party_id": "urn:example:organization:compute-provider",
+      "accepted_at": "2026-09-22T00:00:00Z",
+      "authority_ref": "urn:example:authority:compute-provider-agreement-001:v1",
+      "consent_evidence_ref": "urn:example:consent:compute-provider-001:v1"
+    },
+    {
+      "record_type": "agreement_acceptance",
+      "schema_version": "0.2.0",
+      "acceptance_id": "urn:example:acceptance:community-lab-001",
+      "agreement": {
+        "agreement_id": "urn:example:agreement:ai-collaboration-001",
+        "agreement_version": "1.0.0",
+        "agreement_digest": "sha256:25bda0a93c55051d217b40f84801d61bf05368e74db21bf5c13146198c33c1a4"
+      },
+      "party_id": "urn:example:organization:community-lab",
+      "accepted_at": "2026-09-22T01:00:00Z",
+      "authority_ref": "urn:example:authority:community-lab-agreement-001:v1",
+      "consent_evidence_ref": "urn:example:consent:community-lab-001:v1"
+    },
+    {
+      "record_type": "return_commitment",
+      "schema_version": "0.3.0",
+      "commitment_id": "urn:example:commitment:compute-100-hours-001",
+      "agreement": {
+        "agreement_id": "urn:example:agreement:ai-collaboration-001",
+        "agreement_version": "1.0.0",
+        "agreement_digest": "sha256:25bda0a93c55051d217b40f84801d61bf05368e74db21bf5c13146198c33c1a4"
+      },
+      "term_id": "urn:example:term:compute-100-hours",
+      "acceptance_ids": [
+        "urn:example:acceptance:compute-provider-001",
+        "urn:example:acceptance:community-lab-001"
+      ],
+      "activated_at": "2026-10-01T00:00:00Z",
+      "activation": {
+        "attested_by": "urn:example:organization:compute-provider",
+        "evidence_refs": [
+          "urn:example:activation:compute-100-hours-001:v1"
+        ]
+      }
+    },
+    {
+      "record_type": "fulfillment_receipt",
+      "schema_version": "0.4.0",
+      "receipt_id": "urn:example:receipt:compute-over-limit-001",
+      "commitment_id": "urn:example:commitment:compute-100-hours-001",
+      "issued_at": "2026-10-05T10:00:00Z",
+      "delivery": {
+        "delivery_id": "urn:example:delivery:compute-110-hours-001",
+        "provider_id": "urn:example:organization:compute-provider",
+        "beneficiary_id": "urn:example:organization:community-lab",
+        "resource_id": "urn:example:resource:compute-service-a-v1",
+        "unit": {
+          "namespace": "urn:example:unit:compute-service-a-v1",
+          "code": "HOUR"
+        },
+        "total_quantity": "110",
+        "delivered_at": "2026-10-05T09:00:00Z",
+        "source_ref": "urn:example:usage-record:compute-110-hours-001:v1"
+      },
+      "slice_start": "0",
+      "quantity": "40",
+      "evidence_refs": [
+        "urn:example:report:compute-110-hours-001:v1"
+      ],
+      "confirmation_status": "accepted",
+      "confirmation": {
+        "by_party_id": "urn:example:organization:community-lab",
+        "confirmed_at": "2026-10-05T12:00:00Z",
+        "authority_ref": "urn:example:authority:community-lab-receipt-001:v1",
+        "evidence_refs": [
+          "urn:example:confirmation:compute-over-limit-001:v1"
+        ]
+      }
+    },
+    {
+      "record_type": "fulfillment_receipt",
+      "schema_version": "0.4.0",
+      "receipt_id": "urn:example:receipt:compute-over-limit-002",
+      "commitment_id": "urn:example:commitment:compute-100-hours-001",
+      "issued_at": "2026-10-05T11:00:00Z",
+      "delivery": {
+        "delivery_id": "urn:example:delivery:compute-110-hours-001",
+        "provider_id": "urn:example:organization:compute-provider",
+        "beneficiary_id": "urn:example:organization:community-lab",
+        "resource_id": "urn:example:resource:compute-service-a-v1",
+        "unit": {
+          "namespace": "urn:example:unit:compute-service-a-v1",
+          "code": "HOUR"
+        },
+        "total_quantity": "110",
+        "delivered_at": "2026-10-05T09:00:00Z",
+        "source_ref": "urn:example:usage-record:compute-110-hours-001:v1"
+      },
+      "slice_start": "40",
+      "quantity": "70",
+      "evidence_refs": [
+        "urn:example:report:compute-110-hours-001:v1"
+      ],
+      "confirmation_status": "accepted",
+      "confirmation": {
+        "by_party_id": "urn:example:organization:community-lab",
+        "confirmed_at": "2026-10-05T13:00:00Z",
+        "authority_ref": "urn:example:authority:community-lab-receipt-001:v1",
+        "evidence_refs": [
+          "urn:example:confirmation:compute-over-limit-002:v1"
+        ]
+      }
+    }
+  ]
+}
