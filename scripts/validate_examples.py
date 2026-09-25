@@ -52,11 +52,59 @@ EXPECTED_CASES = {
     "examples/fail/fulfillment-receipt-wrong-confirmation-actor.example.json": {
         "CONFIRMATION_ACTOR",
     },
+    "examples/pass/fulfillment-receipt-shared-evidence.example.json": set(),
+    "examples/fail/fulfillment-receipt-overlapping-slices.example.json": {
+        "DELIVERY_SLICE_OVERLAP",
+    },
+    "examples/fail/fulfillment-receipt-inconsistent-delivery.example.json": {
+        "DELIVERY_METADATA_MISMATCH",
+    },
+    "examples/fail/fulfillment-receipt-accepted-quantity-exceeded.example.json": {
+        "ACCEPTED_QUANTITY_EXCEEDED",
+    },
+    "examples/fail/fulfillment-receipt-cross-commitment-overlap.example.json": {
+        "DELIVERY_SLICE_OVERLAP",
+    },
 }
 
-PARTIAL_EXAMPLE = (
-    "examples/pass/fulfillment-receipt-partial.example.json"
-)
+EXPECTED_SUMMARIES = {
+    "examples/pass/fulfillment-receipt-partial.example.json": [
+        {
+            "commitment_id": (
+                "urn:example:commitment:compute-100-hours-001"
+            ),
+            "unit": {
+                "namespace": "urn:example:unit:compute-service-a-v1",
+                "code": "HOUR",
+            },
+            "promised_quantity": "100",
+            "accepted_quantity": "40",
+            "remaining_quantity": "60",
+            "pending_quantity": "0",
+            "rejected_quantity": "0",
+            "disputed_quantity": "0",
+            "status": "partial",
+        },
+    ],
+    "examples/pass/fulfillment-receipt-shared-evidence.example.json": [
+        {
+            "commitment_id": (
+                "urn:example:commitment:compute-100-hours-001"
+            ),
+            "unit": {
+                "namespace": "urn:example:unit:compute-service-a-v1",
+                "code": "HOUR",
+            },
+            "promised_quantity": "100",
+            "accepted_quantity": "100",
+            "remaining_quantity": "0",
+            "pending_quantity": "0",
+            "rejected_quantity": "0",
+            "disputed_quantity": "0",
+            "status": "fulfilled",
+        },
+    ],
+}
 
 QUANTITY_SCALE = 10**18
 
@@ -111,8 +159,8 @@ def parse_utc(value):
         "%Y-%m-%dT%H:%M:%S",
     )
 
-    # Strip trailing zeros so equal fractions have equal representations.
-    # Lexicographic comparison then preserves fractional time ordering.
+    # Equal fractions have equal representations after stripping zeros.
+    # Lexicographic comparison preserves fractional time ordering.
     fraction = (match.group(2) or "").rstrip("0")
     return seconds, fraction
 
@@ -675,7 +723,8 @@ def validate_document(document, validators):
             )
 
     # Evidence references may be reused. Delivery allocations may not.
-    # All statuses reserve their slices, including rejected/disputed.
+    # Group by delivery_id across all commitments in this dataset.
+    # Every status reserves its slice, including rejected/disputed.
     for delivery_id, indices in delivery_groups.items():
         baseline = records[indices[0]]["delivery"]
 
@@ -723,7 +772,7 @@ def validate_document(document, validators):
         return issues, []
 
     totals = {}
-    for index, term in commitment_terms.items():
+    for index in commitment_terms:
         totals[index] = {
             "pending": 0,
             "accepted": 0,
@@ -809,29 +858,6 @@ def print_summaries(summaries):
         )
 
 
-def partial_summary_matches(summaries):
-    if len(summaries) != 1:
-        return False
-
-    expected = {
-        "commitment_id": (
-            "urn:example:commitment:compute-100-hours-001"
-        ),
-        "unit": {
-            "namespace": "urn:example:unit:compute-service-a-v1",
-            "code": "HOUR",
-        },
-        "promised_quantity": "100",
-        "accepted_quantity": "40",
-        "remaining_quantity": "60",
-        "pending_quantity": "0",
-        "rejected_quantity": "0",
-        "disputed_quantity": "0",
-        "status": "partial",
-    }
-    return summaries[0] == expected
-
-
 def run_examples(validators):
     passed = 0
 
@@ -840,11 +866,24 @@ def run_examples(validators):
             ROOT / relative_path,
             validators,
         )
-        actual_codes = {code for code, _ in issues}
-        success = actual_codes == expected_codes
 
-        if relative_path == PARTIAL_EXAMPLE:
-            success = success and partial_summary_matches(summaries)
+        actual_codes = {code for code, _ in issues}
+        codes_match = actual_codes == expected_codes
+
+        expected_summaries = EXPECTED_SUMMARIES.get(relative_path)
+        summary_matches = (
+            expected_summaries is None
+            or summaries == expected_summaries
+        )
+
+        # Rejected datasets must never expose definitive totals.
+        invalid_summary_absent = not issues or summaries == []
+
+        success = (
+            codes_match
+            and summary_matches
+            and invalid_summary_absent
+        )
 
         label = "PASS" if success else "FAIL"
         print(
@@ -854,16 +893,32 @@ def run_examples(validators):
 
         if success:
             passed += 1
-        else:
-            print(f"  Expected codes: {sorted(expected_codes)}")
-            print_issues(issues)
+            continue
 
-            if relative_path == PARTIAL_EXAMPLE:
-                print(
-                    "  Expected summary: promised=100, accepted=40, "
-                    "remaining=60, status=partial."
+        print(f"  Expected codes: {sorted(expected_codes)}")
+        print_issues(issues)
+
+        if not summary_matches:
+            print(
+                "  Expected summaries: "
+                + json.dumps(
+                    expected_summaries,
+                    ensure_ascii=False,
+                    sort_keys=True,
                 )
-                print_summaries(summaries)
+            )
+            print(
+                "  Actual summaries: "
+                + json.dumps(
+                    summaries,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+
+        if not invalid_summary_absent:
+            print("  Invalid datasets must have no summaries.")
+            print_summaries(summaries)
 
     total = len(EXPECTED_CASES)
     print(f"\n{passed}/{total} examples passed.")
